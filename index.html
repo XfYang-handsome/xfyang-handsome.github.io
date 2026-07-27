@@ -32,12 +32,50 @@
       </div>
 
       <div class="hero-visual">
-        <div class="avatar-frame">
-          <a href="images/me.jpg"><img alt="profile photo" src="images/me.jpg"></a>
+        <div class="nahida-teaser">
+          <img alt="nahida" src="images/nahida.jpg" class="nahida-teaser-img">
+          <span class="nahida-teaser-text">Click Me!!! →</span>
+        </div>
+        <div class="avatar-frame" id="avatar-frame">
+          <img alt="profile photo" src="images/me.jpg" id="avatar-img" style="cursor:pointer;">
         </div>
         <div class="floating-card">Shanghai Jiao Tong University • 2024–2028</div>
       </div>
     </header>
+
+    <!-- ========== 小游戏覆盖层 ========== -->
+    <div id="game-overlay">
+      <!-- 开始弹窗 -->
+      <div id="game-modal">
+        <div class="game-modal-content">
+          <div class="game-modal-icon">🍬</div>
+          <h2>枣椰蜜糖大作战</h2>
+          <p class="game-modal-desc">纳西妲想吃枣椰蜜糖了，你能帮帮她吗？</p>
+          <div class="game-modal-hints">
+            <span>🟡 完美 +3</span>
+            <span>🔵 普通 +2</span>
+            <span>⚫ 瑕疵 +1</span>
+          </div>
+          <div class="game-modal-buttons">
+            <button id="game-start-btn" class="btn btn-primary">确定</button>
+            <button id="game-cancel-btn" class="btn btn-secondary">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 游戏 HUD -->
+      <div id="game-hud">
+        <div class="game-hud-left">
+          <span class="game-hud-label">🍬 分数</span>
+          <span id="game-score">0</span>
+        </div>
+        <div id="game-skill-indicator">✨ 特殊料理发动中！</div>
+        <button id="game-close-btn" class="game-close-btn">✕ 退出游戏</button>
+      </div>
+
+      <!-- Canvas -->
+      <canvas id="game-canvas"></canvas>
+    </div>
 
     <main class="content-grid">
       <section class="panel">
@@ -58,6 +96,629 @@
     <script type="text/javascript" id="clstr_globe" src="//clustrmaps.com/globe.js?d=aMVHFEovT1gn6oVMvrp2ObQJiBrdVwX3nwGXqquyIoQ&w=300&h=200"></script>
 
   </div>
+
+  <!-- ========== 小游戏脚本 ========== -->
+  <script>
+  (function() {
+    /* ---------- DOM refs ---------- */
+    const avatarImg     = document.getElementById('avatar-img');
+    const avatarFrame   = document.getElementById('avatar-frame');
+    const gameOverlay   = document.getElementById('game-overlay');
+    const gameModal     = document.getElementById('game-modal');
+    const startBtn      = document.getElementById('game-start-btn');
+    const cancelBtn     = document.getElementById('game-cancel-btn');
+    const closeBtn      = document.getElementById('game-close-btn');
+    const gameHud       = document.getElementById('game-hud');
+    const scoreEl       = document.getElementById('game-score');
+    const skillInd      = document.getElementById('game-skill-indicator');
+    const canvas        = document.getElementById('game-canvas');
+    const ctx           = canvas.getContext('2d');
+
+    /* ---------- 资源 ---------- */
+    const IMG_NAHIDA   = 'images/nahida.jpg';
+    const IMG_PERFECT  = 'images/perfect.png';
+    const IMG_NORMAL   = 'images/normal.png';
+    const IMG_BAD      = 'images/bad.png';
+    const IMG_SPECIAL  = 'images/special.png';
+
+    const imgCache = {};
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        if (imgCache[src]) return resolve(imgCache[src]);
+        const img = new Image();
+        img.onload = () => { imgCache[src] = img; resolve(img); };
+        img.onerror = reject;
+        img.src = src;
+      });
+    }
+
+    /* ---------- 游戏常量 ---------- */
+    const GROUND_H       = 80;
+    const NAHIDA_W       = 80;
+    const NAHIDA_H       = 96;
+    const CANDY_SIZE     = 44;
+    const INITIAL_FALL_S = 2.0;    // 初始下落秒数
+    const MIN_FALL_S     = 0.7;    // 极限下落秒数
+    const INITIAL_SPAWN  = 900;    // 初始生成间隔 ms
+    const MIN_SPAWN      = 300;    // 极限生成间隔 ms
+    const SKILL_SEC      = 10;     // 技能持续时间
+    const SCORE_THRESH   = 100;    // 每 100 分触发技能
+
+    const CANDY_CFG = {
+      perfect: { score: 3, img: IMG_PERFECT, hp: 0.02 },
+      normal:  { score: 2, img: IMG_NORMAL,  hp: 0    },
+      bad:     { score: 1, img: IMG_BAD,     hp: -8   },
+      special: { score: 5, img: IMG_SPECIAL, hp: 0.5  },
+    };
+
+    const MAX_HP = 100;
+
+    /* ---------- 游戏状态 ---------- */
+    let score           = 0;
+    let skillScore      = 0;     // 不计 special 的技能计量
+    let prevMilestone   = 0;
+    let hp              = MAX_HP;
+    let skillActive     = false;
+    let skillRemain     = 0;
+    let gameTime        = 0;     // 秒
+    let nahidaX         = 0;
+    let isDragging      = false;
+    let dragOffX        = 0;
+    let candies         = [];
+    let lastSpawn       = 0;
+    let animId          = null;
+    let gameRunning     = false;
+    let gameOver        = false;
+    let lastFrameTime   = 0;
+
+    /* 粒子特效 */
+    let particles = [];
+
+    /* ---------- 辅助函数 ---------- */
+    function rand(min, max) { return Math.random() * (max - min) + min; }
+    function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
+
+    function getGroundY() { return canvas.height - GROUND_H; }
+
+    function randomCandyType() {
+      const r = Math.random();
+      if (r < 0.25) return 'perfect';
+      if (r < 0.65) return 'normal';
+      return 'bad';
+    }
+
+    function getFallDuration() {
+      // 随时间减少，极限 0.7s
+      return Math.max(MIN_FALL_S, INITIAL_FALL_S - gameTime * 0.015);
+    }
+
+    function getSpawnInterval() {
+      return Math.max(MIN_SPAWN, INITIAL_SPAWN - gameTime * 7);
+    }
+
+    /* ---------- Canvas resize ---------- */
+    function resizeCanvas() {
+      canvas.width  = window.innerWidth;
+      canvas.height = window.innerHeight;
+      // 调整 nahida 初始位置
+      nahidaX = Math.min(nahidaX, canvas.width - NAHIDA_W);
+      if (nahidaX < 0) nahidaX = canvas.width / 2 - NAHIDA_W / 2;
+    }
+
+    /* ---------- 糖果 ---------- */
+    function spawnCandy() {
+      const fallDur = getFallDuration();
+      const groundY = getGroundY();
+      const travelDist = groundY - 0; // top to ground
+      const speed = travelDist / fallDur; // px/s
+
+      const type = skillActive ? 'special' : randomCandyType();
+      candies.push({
+        x: rand(CANDY_SIZE / 2, canvas.width - CANDY_SIZE / 2),
+        y: -CANDY_SIZE,
+        type: type,
+        speed: speed,
+        size: CANDY_SIZE,
+      });
+    }
+
+    /* ---------- 粒子 ---------- */
+    function spawnParticles(x, y, count, color) {
+      for (let i = 0; i < count; i++) {
+        particles.push({
+          x, y,
+          vx: rand(-150, 150),
+          vy: rand(-200, -50),
+          life: rand(0.5, 1.2),
+          maxLife: rand(0.5, 1.2),
+          color: color,
+          size: rand(2, 6),
+        });
+      }
+    }
+
+    /* ---------- 技能触发 ---------- */
+    function triggerSkill() {
+      skillActive = true;
+      skillRemain = SKILL_SEC;
+      skillInd.style.display = 'block';
+      // 把场上所有糖果变成 special
+      candies.forEach(c => { c.type = 'special'; });
+      // 爆炸粒子
+      spawnParticles(canvas.width / 2, canvas.height / 2, 80, '#ffd700');
+      // 技能结束倒计时闪烁
+      skillInd.classList.add('pulse');
+    }
+
+    function endSkill() {
+      skillActive = false;
+      skillRemain = 0;
+      skillInd.style.display = 'none';
+      skillInd.classList.remove('pulse');
+    }
+
+    /* ---------- 游戏循环 ---------- */
+    function gameLoop(timestamp) {
+      if (!gameRunning) return;
+      animId = requestAnimationFrame(gameLoop);
+
+      if (!lastFrameTime) lastFrameTime = timestamp;
+      let dt = (timestamp - lastFrameTime) / 1000;
+      if (dt > 0.1) dt = 0.1;
+      lastFrameTime = timestamp;
+
+      if (gameOver) {
+        // 游戏结束只渲染不动
+        render();
+        return;
+      }
+
+      gameTime += dt;
+
+      // 更新技能计时
+      if (skillActive) {
+        skillRemain -= dt;
+        if (skillRemain <= 0) {
+          endSkill();
+        }
+      }
+
+      // 生成糖果
+      const interval = getSpawnInterval();
+      if (gameTime * 1000 - lastSpawn > interval) {
+        spawnCandy();
+        lastSpawn = gameTime * 1000;
+      }
+
+      // 更新糖果位置
+      const groundY = getGroundY();
+      const nahidaCX = nahidaX + NAHIDA_W / 2;
+
+      for (let i = candies.length - 1; i >= 0; i--) {
+        const c = candies[i];
+        c.y += c.speed * dt;
+
+        // 检测是否到达地面
+        if (c.y + c.size >= groundY) {
+          const candyCX = c.x + c.size / 2;
+          const dist = Math.abs(candyCX - nahidaCX);
+          const catchRange = (NAHIDA_W + c.size) / 2;
+
+          if (dist < catchRange) {
+            const pts = CANDY_CFG[c.type].score;
+            const hpDelta = CANDY_CFG[c.type].hp;
+            score += pts;
+
+            // special 不计入技能计量条
+            if (c.type !== 'special') {
+              skillScore += pts;
+            }
+
+            // HP 变化
+            hp += hpDelta;
+            if (hp > MAX_HP) hp = MAX_HP;
+            if (hp <= 0) {
+              hp = 0;
+              gameOver = true;
+            }
+
+            // 粒子效果
+            const pColor = c.type === 'special' ? '#ffd700' :
+                           c.type === 'perfect' ? '#ffcc00' :
+                           c.type === 'normal'  ? '#66ccff' :
+                           hpDelta < 0         ? '#ff4444' : '#999';
+            const pCount = hpDelta < 0 ? 20 : 12;
+            spawnParticles(c.x + c.size / 2, c.y + c.size / 2, pCount, pColor);
+
+            // 检测技能触发（仅基于 skillScore）
+            if (!gameOver) {
+              const newMilestone = Math.floor(skillScore / SCORE_THRESH) * SCORE_THRESH;
+              if (newMilestone > prevMilestone) {
+                prevMilestone = newMilestone;
+                triggerSkill();
+              }
+            }
+
+            scoreEl.textContent = score;
+          }
+
+          candies.splice(i, 1);
+        }
+
+        if (c.y > canvas.height + CANDY_SIZE) {
+          candies.splice(i, 1);
+        }
+      }
+
+      // 更新粒子
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+
+      // ---- 渲染 ----
+      render();
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 背景渐变天空
+      const skyGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      if (skillActive) {
+        skyGrad.addColorStop(0, '#1a0a2e');
+        skyGrad.addColorStop(0.5, '#2d1b4e');
+        skyGrad.addColorStop(1, '#4a2c6e');
+      } else {
+        skyGrad.addColorStop(0, '#0f2038');
+        skyGrad.addColorStop(0.5, '#1a3a5c');
+        skyGrad.addColorStop(1, '#2d5a7a');
+      }
+      ctx.fillStyle = skyGrad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // 技能特效：背景闪烁星星
+      if (skillActive) {
+        ctx.fillStyle = 'rgba(255, 215, 0, 0.06)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // 闪烁星星
+        for (let i = 0; i < 15; i++) {
+          const sx = (Math.sin(gameTime * 3 + i * 1.7) * 0.5 + 0.5) * canvas.width;
+          const sy = (Math.cos(gameTime * 2.5 + i * 2.1) * 0.5 + 0.5) * (getGroundY() * 0.5);
+          const alpha = 0.3 + Math.sin(gameTime * 5 + i) * 0.2;
+          ctx.fillStyle = `rgba(255, 215, 0, ${alpha})`;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 2 + i % 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // 地面
+      const groundY = getGroundY();
+      const groundGrad = ctx.createLinearGradient(0, groundY, 0, canvas.height);
+      groundGrad.addColorStop(0, '#5a8a3c');
+      groundGrad.addColorStop(0.15, '#4a7030');
+      groundGrad.addColorStop(1, '#3a5020');
+      ctx.fillStyle = groundGrad;
+      ctx.fillRect(0, groundY, canvas.width, GROUND_H);
+
+      // 地面纹理线
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < canvas.width; i += 40) {
+        ctx.beginPath();
+        ctx.moveTo(i, groundY);
+        ctx.lineTo(i - 20, canvas.height);
+        ctx.stroke();
+      }
+
+      // 地面顶部高亮边
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, groundY);
+      ctx.lineTo(canvas.width, groundY);
+      ctx.stroke();
+
+      // 草丛装饰
+      ctx.fillStyle = '#6a9a4c';
+      for (let i = 0; i < canvas.width; i += 30) {
+        const h = 8 + Math.sin(i * 0.3 + gameTime) * 4;
+        ctx.beginPath();
+        ctx.moveTo(i, groundY);
+        ctx.lineTo(i + 3, groundY - h);
+        ctx.lineTo(i + 6, groundY);
+        ctx.fill();
+      }
+
+      // 糖果
+      candies.forEach(c => {
+        const imgKey = CANDY_CFG[c.type].img;
+        const img = imgCache[imgKey];
+        if (img) {
+          // 技能中的糖果发光
+          if (skillActive && c.type === 'special') {
+            ctx.save();
+            ctx.shadowColor = '#ffd700';
+            ctx.shadowBlur = 18 + Math.sin(gameTime * 8) * 8;
+            ctx.drawImage(img, c.x, c.y, c.size, c.size);
+            ctx.restore();
+          } else {
+            ctx.drawImage(img, c.x, c.y, c.size, c.size);
+          }
+        } else {
+          // fallback 圆形
+          ctx.fillStyle = c.type === 'perfect' ? '#ffcc00' :
+                          c.type === 'normal'  ? '#66ccff' :
+                          c.type === 'special' ? '#ffd700' : '#888';
+          ctx.beginPath();
+          ctx.arc(c.x + c.size / 2, c.y + c.size / 2, c.size / 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      });
+
+      // 纳西妲
+      const nahidaY = groundY - NAHIDA_H;
+      const nahidaImg = imgCache[IMG_NAHIDA];
+      if (nahidaImg) {
+        // 影子
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(nahidaX + NAHIDA_W / 2, groundY - 4, NAHIDA_W / 2.5, 6, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 技能中发光
+        if (skillActive) {
+          ctx.save();
+          ctx.shadowColor = '#ffd700';
+          ctx.shadowBlur = 25;
+        }
+        ctx.drawImage(nahidaImg, nahidaX, nahidaY, NAHIDA_W, NAHIDA_H);
+        if (skillActive) ctx.restore();
+      } else {
+        // fallback
+        ctx.fillStyle = '#c8a882';
+        ctx.fillRect(nahidaX, nahidaY, NAHIDA_W, NAHIDA_H);
+      }
+
+      // 粒子
+      particles.forEach(p => {
+        const alpha = p.life / p.maxLife;
+        ctx.fillStyle = p.color.replace(')', `, ${alpha})`).replace('rgb', 'rgba');
+        if (p.color.startsWith('#')) {
+          const hex = p.color;
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = hex;
+        }
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+
+      // 技能倒计时条
+      if (skillActive) {
+        const barW = 200;
+        const barH = 8;
+        const barX = canvas.width / 2 - barW / 2;
+        const barY = 18;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(barX - 2, barY - 2, barW + 4, barH + 4);
+        const progress = skillRemain / SKILL_SEC;
+        const barGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+        barGrad.addColorStop(0, '#ffd700');
+        barGrad.addColorStop(1, '#ff6b00');
+        ctx.fillStyle = barGrad;
+        ctx.fillRect(barX, barY, barW * progress, barH);
+
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 12px Lato, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`特殊料理 ${skillRemain.toFixed(1)}s`, canvas.width / 2, barY - 6);
+      }
+
+      // ---- HP 血条（画布左上区域） ----
+      const hpBarW = 220;
+      const hpBarH = 16;
+      const hpBarX = 20;
+      const hpBarY = skillActive ? 50 : 20;
+      // 背景
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.roundRect(hpBarX - 2, hpBarY - 2, hpBarW + 4, hpBarH + 4, 10);
+      ctx.fill();
+      // 边框
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(hpBarX - 2, hpBarY - 2, hpBarW + 4, hpBarH + 4, 10);
+      ctx.stroke();
+      // 填充
+      const hpRatio = hp / MAX_HP;
+      let hpColor;
+      if (hpRatio > 0.5) hpColor = '#63e6be';
+      else if (hpRatio > 0.2) hpColor = '#ffcc00';
+      else hpColor = '#ff4444';
+      const hpGrad = ctx.createLinearGradient(hpBarX, 0, hpBarX + hpBarW, 0);
+      hpGrad.addColorStop(0, hpColor);
+      hpGrad.addColorStop(1, hpColor);
+      ctx.fillStyle = hpGrad;
+      ctx.beginPath();
+      ctx.roundRect(hpBarX, hpBarY, hpBarW * hpRatio, hpBarH, 8);
+      ctx.fill();
+      // 文字
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 12px Lato, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`❤️ ${Math.ceil(hp)} / ${MAX_HP}`, hpBarX + hpBarW / 2, hpBarY + hpBarH / 1.5);
+
+      // 受伤闪红
+      if (hpRatio <= 0.2 && hp > 0) {
+        const flicker = Math.sin(gameTime * 10) * 0.06;
+        ctx.fillStyle = `rgba(255, 0, 0, ${0.08 + flicker})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      // ---- 游戏结束 ----
+      if (gameOver) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#ff4444';
+        ctx.font = 'bold 42px Lato, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('游戏结束', canvas.width / 2, canvas.height / 2 - 30);
+
+        ctx.fillStyle = '#fff';
+        ctx.font = '18px Lato, sans-serif';
+        ctx.fillText(`最终得分: ${score}`, canvas.width / 2, canvas.height / 2 + 20);
+
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = '14px Lato, sans-serif';
+        ctx.fillText('按 ESC 或点击退出按钮返回', canvas.width / 2, canvas.height / 2 + 50);
+      }
+    }
+
+    /* ---------- 事件处理 ---------- */
+    function getEventPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (e.touches ? e.touches[0].clientX : e.clientX) - rect.left,
+        y: (e.touches ? e.touches[0].clientY : e.clientY) - rect.top,
+      };
+    }
+
+    function onPointerDown(e) {
+      if (!gameRunning) return;
+      const pos = getEventPos(e);
+      const groundY = getGroundY();
+      const nahidaY = groundY - NAHIDA_H;
+      if (
+        pos.x >= nahidaX && pos.x <= nahidaX + NAHIDA_W &&
+        pos.y >= nahidaY && pos.y <= groundY
+      ) {
+        isDragging = true;
+        dragOffX = pos.x - nahidaX;
+        e.preventDefault();
+      }
+    }
+
+    function onPointerMove(e) {
+      if (!isDragging || !gameRunning) return;
+      const pos = getEventPos(e);
+      let newX = pos.x - dragOffX;
+      newX = Math.max(0, Math.min(newX, canvas.width - NAHIDA_W));
+      nahidaX = newX;
+      e.preventDefault();
+    }
+
+    function onPointerUp(e) {
+      isDragging = false;
+    }
+
+    /* ---------- 开始/停止 ---------- */
+    async function startGame() {
+      gameModal.style.display = 'none';
+      gameHud.style.display = 'flex';
+      canvas.style.display = 'block';
+
+      // 预加载图片
+      try {
+        await Promise.all([
+          loadImage(IMG_NAHIDA),
+          loadImage(IMG_PERFECT),
+          loadImage(IMG_NORMAL),
+          loadImage(IMG_BAD),
+          loadImage(IMG_SPECIAL),
+        ]);
+      } catch (err) {
+        console.warn('图片加载失败', err);
+      }
+
+      resizeCanvas();
+      score = 0;
+      skillScore = 0;
+      prevMilestone = 0;
+      hp = MAX_HP;
+      skillActive = false;
+      skillRemain = 0;
+      gameTime = 0;
+      gameOver = false;
+      nahidaX = canvas.width / 2 - NAHIDA_W / 2;
+      candies = [];
+      particles = [];
+      lastSpawn = 0;
+      lastFrameTime = 0;
+      scoreEl.textContent = '0';
+      skillInd.style.display = 'none';
+      skillInd.classList.remove('pulse');
+
+      gameRunning = true;
+      animId = requestAnimationFrame(gameLoop);
+    }
+
+    function stopGame() {
+      gameRunning = false;
+      if (animId) cancelAnimationFrame(animId);
+      animId = null;
+      canvas.style.display = 'none';
+      gameHud.style.display = 'none';
+      gameOverlay.style.display = 'none';
+      document.body.style.overflow = '';
+      endSkill();
+    }
+
+    function openModal() {
+      gameOverlay.style.display = 'flex';
+      gameModal.style.display = 'flex';
+      gameHud.style.display = 'none';
+      canvas.style.display = 'none';
+      document.body.style.overflow = 'hidden';
+    }
+
+    /* ---------- 绑定事件 ---------- */
+    avatarImg.addEventListener('click', (e) => {
+      e.preventDefault();
+      openModal();
+    });
+
+    // 也允许点击整个 avatar-frame
+    avatarFrame.addEventListener('click', (e) => {
+      if (e.target === avatarImg) return; // 上面已处理
+      openModal();
+    });
+
+    startBtn.addEventListener('click', startGame);
+    cancelBtn.addEventListener('click', () => {
+      gameOverlay.style.display = 'none';
+      gameModal.style.display = 'none';
+      document.body.style.overflow = '';
+    });
+    closeBtn.addEventListener('click', stopGame);
+
+    // Canvas 拖拽
+    canvas.addEventListener('mousedown', onPointerDown);
+    canvas.addEventListener('mousemove', onPointerMove);
+    canvas.addEventListener('mouseup', onPointerUp);
+    canvas.addEventListener('mouseleave', onPointerUp);
+    canvas.addEventListener('touchstart', onPointerDown, { passive: false });
+    canvas.addEventListener('touchmove', onPointerMove, { passive: false });
+    canvas.addEventListener('touchend', onPointerUp);
+
+    // 窗口大小变化
+    window.addEventListener('resize', () => {
+      if (gameRunning) resizeCanvas();
+    });
+
+    // ESC 退出
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && gameRunning) stopGame();
+    });
+  })();
+  </script>
+
 </body>
 
 </html>
