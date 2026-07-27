@@ -271,8 +271,8 @@ body::before {
 }
 
 .nahida-teaser-img {
-  width: 64px;
-  height: 64px;
+  width: 66px;
+  height: 66px;
   border-radius: 50%;
   object-fit: cover;
   border: 2px solid var(--accent);
